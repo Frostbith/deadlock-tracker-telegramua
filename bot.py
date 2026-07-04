@@ -417,23 +417,60 @@ def main():
                 appid_str = str(appid)
                 old_cn = state.get(appid_str, 0)
                 
+                # Перевіряємо чи є відкладене оновлення для цього AppID
+                pending_key = f"pending_{appid_str}"
+                pending = state.get(pending_key)
+                
+                if pending:
+                    logger.info(f"Виявлено відкладене оновлення для {name} ({appid}). Перевіряємо версію на GitHub...")
+                    current_ver = get_deadlock_version_from_github()
+                    old_ver = pending["old_ver"]
+                    
+                    if current_ver and current_ver != old_ver:
+                        logger.info(f"Знайдено нову версію на GitHub під час відкладеного моніторингу: {current_ver}")
+                        new_cn = pending["new_cn"]
+                        
+                        send_telegram_notification(
+                            name, appid, pending["old_cn"], new_cn,
+                            old_ver=old_ver, new_ver=current_ver, ver_updated=1
+                        )
+                        
+                        state[appid_str] = new_cn
+                        state[f"{appid_str}_version"] = current_ver
+                        state.pop(pending_key, None)
+                        save_state(state)
+                        continue
+                    
+                    time_passed = time.time() - pending["timestamp"]
+                    if time_passed >= 300:
+                        logger.info("Минуло 5 хвилин очікування на GitHub. Оновлення визнано технічним.")
+                        new_cn = pending["new_cn"]
+                        
+                        send_telegram_notification(
+                            name, appid, pending["old_cn"], new_cn,
+                            old_ver=old_ver, new_ver=old_ver, ver_updated=0
+                        )
+                        
+                        state[appid_str] = new_cn
+                        state.pop(pending_key, None)
+                        save_state(state)
+                        continue
+                    else:
+                        logger.info(f"Очікуємо оновлення GitHub. Минуло {int(time_passed)} сек з 300.")
+                        continue
+                
                 try:
                     new_cn = get_latest_changenumber(appid)
                     
                     if new_cn != old_cn:
                         logger.info(f"[ОНОВЛЕННЯ] {name} ({appid}): {old_cn} -> {new_cn}")
                         
-                        old_ver = ""
-                        new_ver = ""
-                        ver_updated = -1
-                        
                         if appid == 1422450:
                             version_key = f"{appid_str}_version"
                             old_ver = state.get(version_key, "unknown")
-                            new_ver = old_ver
-                            logger.info("Виявлено зміну changenumber. Запит нової ClientVersion з GitHub...")
                             
-                            # Пробуємо отримати нову версію з інтервалом в 15 сек (робимо 5 спроб)
+                            # Робимо 5 швидких спроб перевірити GitHub (з інтервалом 15 сек)
+                            new_ver = old_ver
                             for attempt in range(5):
                                 temp_ver = get_deadlock_version_from_github()
                                 if temp_ver and temp_ver != old_ver:
@@ -441,13 +478,26 @@ def main():
                                     logger.info(f"Знайдено нову версію на GitHub: {new_ver} (спроба {attempt+1})")
                                     break
                                 time.sleep(15)
-                            
-                            if new_ver == old_ver:
-                                ver_updated = 0
-                                logger.info(f"Версія клієнта не змінилася ({old_ver}). Зміна є технічною.")
-                            else:
-                                ver_updated = 1
+                                
+                            if new_ver != old_ver:
+                                # Версія оновилася одразу!
+                                send_telegram_notification(
+                                    name, appid, old_cn, new_cn,
+                                    old_ver=old_ver, new_ver=new_ver, ver_updated=1
+                                )
+                                state[appid_str] = new_cn
                                 state[version_key] = new_ver
+                                save_state(state)
+                            else:
+                                # Версія ще не оновилася. Відкладаємо повідомлення на 5 хвилин
+                                logger.info("Версія на GitHub ще не змінилася. Створюємо відкладену перевірку...")
+                                state[pending_key] = {
+                                    "old_cn": old_cn,
+                                    "new_cn": new_cn,
+                                    "timestamp": time.time(),
+                                    "old_ver": old_ver
+                                }
+                                save_state(state)
                         elif appid == 3488080:
                             version_key = f"{appid_str}_version"
                             old_ver = state.get(version_key, "1926")
@@ -456,18 +506,14 @@ def main():
                                 new_ver = str(old_ver_int + 1)
                             except ValueError:
                                 new_ver = "1927"
-                            ver_updated = 1
+                            
+                            send_telegram_notification(
+                                name, appid, old_cn, new_cn,
+                                old_ver=old_ver, new_ver=new_ver, ver_updated=1
+                            )
+                            state[appid_str] = new_cn
                             state[version_key] = new_ver
-                        
-                        # Надсилаємо сповіщення
-                        sent = send_telegram_notification(
-                            name, appid, old_cn, new_cn,
-                            old_ver=old_ver, new_ver=new_ver, ver_updated=ver_updated
-                        )
-                        
-                        # Оновлюємо стан, навіть якщо відправка не вдалася (щоб уникнути спаму при повторній перевірці)
-                        state[appid_str] = new_cn
-                        save_state(state)
+                            save_state(state)
                     else:
                         logger.debug(f"Без змін для {name} ({appid}): CN {old_cn}")
                         
