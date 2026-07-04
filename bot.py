@@ -253,6 +253,44 @@ def get_deadlock_version_from_github() -> str:
     return ""
 
 
+def get_experimental_version_from_telegram() -> tuple:
+    """Парсить останню версію Deadlock Experimental з публічного джерела."""
+    import html
+    import urllib.request
+    import re
+    url = os.getenv("EXPERIMENTAL_SOURCE_URL")
+    if not url:
+        return "", "", -1
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64)"})
+        with urllib.request.urlopen(req, timeout=10) as response:
+            html_content = response.read().decode("utf-8")
+            message_blocks = re.findall(r'<div class="tgme_widget_message_text[^>]*>(.*?)</div>', html_content, re.DOTALL)
+            for block in reversed(message_blocks):
+                text = html.unescape(block)
+                text = re.sub(r'<[^>]+>', ' ', text)
+                text = text.replace('&nbsp;', ' ')
+                if "Deadlock Experimental" in text:
+                    match = re.search(r'\[\s*(\d+)\s*(?:=>|->|→)\s*(\d+)\s*\]', text)
+                    if match:
+                        old_ver = match.group(1)
+                        new_ver = match.group(2)
+                        
+                        # Зчитуємо кількість оновлених версій
+                        ver_updated = 1
+                        try:
+                            update_match = re.search(r'(?:версий|версій)\D*(\d+)', text, re.IGNORECASE)
+                            if update_match:
+                                ver_updated = int(update_match.group(1))
+                            else:
+                                ver_updated = int(new_ver) - int(old_ver)
+                        except Exception:
+                            pass
+                        return old_ver, new_ver, ver_updated
+    except Exception as e:
+        logger.warning(f"Не вдалося отримати версію Experimental з Telegram: {e}")
+    return "", "", -1
+
 
 def send_telegram_notification(app_name: str, appid: int, old_cn: int, new_cn: int, old_ver: str = "", new_ver: str = "", ver_updated: int = -1) -> bool:
     """Надсилає повідомлення про зміну changenumber або версії в Telegram-канал у новому візуальному дизайні."""
@@ -395,9 +433,13 @@ def main():
         elif appid == 3488080:
             version_key = f"{appid_str}_version"
             if version_key not in state:
-                state[version_key] = "1926"
+                # Пробуємо отримати останню версію з Telegram
+                _, current_ver, _ = get_experimental_version_from_telegram()
+                if not current_ver:
+                    current_ver = "1926"  # Фолбек за замовчуванням
+                state[version_key] = current_ver
                 state_modified = True
-                logger.info(f"Ініціалізовано початкову версію для {name} ({appid}): 1926")
+                logger.info(f"Ініціалізовано початкову версію для {name} ({appid}): {current_ver}")
                 
         # Затримка між запитами при ініціалізації
         time.sleep(2)
@@ -501,15 +543,32 @@ def main():
                         elif appid == 3488080:
                             version_key = f"{appid_str}_version"
                             old_ver = state.get(version_key, "1926")
-                            try:
-                                old_ver_int = int(old_ver)
-                                new_ver = str(old_ver_int + 1)
-                            except ValueError:
-                                new_ver = "1927"
                             
+                            # Пробуємо отримати нові версії з Telegram (робимо 5 спроб із затримкою 15 сек)
+                            new_ver = ""
+                            ver_updated = -1
+                            logger.info("Виявлено зміну changenumber. Запит нової версії з Telegram...")
+                            for attempt in range(5):
+                                t_old, t_new, t_upd = get_experimental_version_from_telegram()
+                                if t_new and t_new != old_ver:
+                                    new_ver = t_new
+                                    ver_updated = t_upd
+                                    logger.info(f"Знайдено нову версію в Telegram: {new_ver} (спроба {attempt+1})")
+                                    break
+                                time.sleep(15)
+                                
+                            if not new_ver:
+                                try:
+                                    old_ver_int = int(old_ver)
+                                    new_ver = str(old_ver_int + 1)
+                                except ValueError:
+                                    new_ver = "1927"
+                                ver_updated = 1
+                                logger.info(f"Telegram не надіслав оновлену версію. Використовуємо локальний інкремент: {new_ver}")
+                                
                             send_telegram_notification(
                                 name, appid, old_cn, new_cn,
-                                old_ver=old_ver, new_ver=new_ver, ver_updated=1
+                                old_ver=old_ver, new_ver=new_ver, ver_updated=ver_updated
                             )
                             state[appid_str] = new_cn
                             state[version_key] = new_ver
